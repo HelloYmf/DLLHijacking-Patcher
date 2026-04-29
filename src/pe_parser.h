@@ -35,3 +35,10 @@ DWORD RvaToFoa(const std::wstring& dllPath, DWORD rva);
 // Read a single byte from a file at the given raw file offset.
 // Returns 0 and sets |ok| to false on failure (out parameter is optional).
 BYTE ReadOneByte(const std::wstring& filePath, DWORD fileOffset, bool* ok = nullptr);
+
+// In the given DLL file (must be a writable copy, NOT the original), set every
+// base-relocation entry whose target RVA falls within [rvaLow, rvaHigh) to
+// IMAGE_REL_BASED_ABSOLUTE (type bits = 0).  The loader ignores type-0 entries,
+// so bytes in that range will no longer be patched at load time.
+// Returns the number of entries neutralised, 0 if none matched, or -1 on I/O error.
+int PatchOutRelocEntries(const std::wstring& dllFilePath, DWORD rvaLow, DWORD rvaHigh);

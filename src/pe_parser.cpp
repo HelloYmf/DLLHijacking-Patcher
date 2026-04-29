@@ -247,3 +247,103 @@ DWORD RvaToFoa(const std::wstring& dllPath, DWORD rva)
     });
     return foa;
 }
+
+int PatchOutRelocEntries(const std::wstring& dllFilePath, DWORD rvaLow, DWORD rvaHigh)
+{
+    // File offsets of WORD entries that must be neutralised (top 4 bits → 0).
+    struct PatchSite { DWORD fileOffset; };
+    std::vector<PatchSite> sites;
+
+    // Phase 1: read-only map — walk the base-relocation table and collect
+    //          the file offset of every entry whose target RVA falls in [rvaLow, rvaHigh).
+    bool scanned = false;
+    WithMappedFile(dllFilePath, [&](BYTE* base, DWORD /*fileSize*/) {
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+
+        auto* nt32 = reinterpret_cast<IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+        if (nt32->Signature != IMAGE_NT_SIGNATURE) return;
+
+        bool is64 = (nt32->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64);
+
+        IMAGE_SECTION_HEADER* sections;
+        DWORD numSections;
+        DWORD relocRva, relocSize;
+
+        if (is64) {
+            auto* nt64 = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+            sections    = IMAGE_FIRST_SECTION(nt64);
+            numSections = nt64->FileHeader.NumberOfSections;
+            relocRva    = nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
+            relocSize   = nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
+        } else {
+            sections    = IMAGE_FIRST_SECTION(nt32);
+            numSections = nt32->FileHeader.NumberOfSections;
+            relocRva    = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
+            relocSize   = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
+        }
+
+        if (!relocRva || !relocSize) { scanned = true; return; }  // no reloc table
+
+        DWORD relocFoa = RvaToFileOffset(sections, numSections, relocRva);
+        if (!relocFoa) return;
+
+        BYTE* p    = base + relocFoa;
+        BYTE* pEnd = p + relocSize;
+
+        while (p + sizeof(IMAGE_BASE_RELOCATION) <= pEnd) {
+            auto* blk = reinterpret_cast<IMAGE_BASE_RELOCATION*>(p);
+            if (blk->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION)) break;
+
+            DWORD pageRva    = blk->VirtualAddress;
+            DWORD numEntries = (blk->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            WORD* entries    = reinterpret_cast<WORD*>(p + sizeof(IMAGE_BASE_RELOCATION));
+
+            for (DWORD i = 0; i < numEntries; i++) {
+                BYTE  type      = static_cast<BYTE>(entries[i] >> 12);
+                DWORD targetRva = pageRva + static_cast<DWORD>(entries[i] & 0x0FFFu);
+
+                if (type == IMAGE_REL_BASED_ABSOLUTE) continue;  // padding, already a no-op
+
+                if (type == IMAGE_REL_BASED_HIGHADJ) {
+                    // HIGHADJ consumes two consecutive entries; record both if in range.
+                    if (targetRva >= rvaLow && targetRva < rvaHigh) {
+                        sites.push_back({ static_cast<DWORD>(reinterpret_cast<BYTE*>(&entries[i])     - base) });
+                        if (i + 1 < numEntries)
+                            sites.push_back({ static_cast<DWORD>(reinterpret_cast<BYTE*>(&entries[i + 1]) - base) });
+                    }
+                    i++;  // skip the adjustment word
+                    continue;
+                }
+
+                if (targetRva >= rvaLow && targetRva < rvaHigh)
+                    sites.push_back({ static_cast<DWORD>(reinterpret_cast<BYTE*>(&entries[i]) - base) });
+            }
+            p += blk->SizeOfBlock;
+        }
+        scanned = true;
+    });
+
+    if (!scanned) return -1;
+    if (sites.empty()) return 0;
+
+    // Phase 2: open the file for writing and clear the top 4 bits of each site.
+    HANDLE hFile = CreateFileW(dllFilePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                               0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return -1;
+
+    int count = 0;
+    for (const auto& s : sites) {
+        WORD  orig = 0;
+        DWORD rw   = 0;
+        SetFilePointer(hFile, static_cast<LONG>(s.fileOffset), nullptr, FILE_BEGIN);
+        if (ReadFile(hFile, &orig, 2, &rw, nullptr) && rw == 2) {
+            WORD patched = orig & 0x0FFFu;  // top 4 bits → 0 = IMAGE_REL_BASED_ABSOLUTE
+            SetFilePointer(hFile, static_cast<LONG>(s.fileOffset), nullptr, FILE_BEGIN);
+            WriteFile(hFile, &patched, 2, &rw, nullptr);
+            count++;
+        }
+    }
+    CloseHandle(hFile);
+    return count;
+}

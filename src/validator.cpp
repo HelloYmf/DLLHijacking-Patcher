@@ -201,6 +201,10 @@ void PointValidator::SaveOutput(DWORD callerRva, DWORD callerFoa,
             }
         }
         CloseHandle(hOut);
+
+        // Neutralise base-relocation entries overlapping the blank region so the
+        // loader does not patch over the injected shellcode at load time.
+        PatchOutRelocEntries(outDll, blank.rva, blank.rva + blank.size);
     }
 
     printf("[validate] output  caller_rva=0x%08X  blank_rva=0x%08X  size=0x%X  dir=%s\n",
@@ -244,7 +248,7 @@ ValidationResult PointValidator::Validate(DWORD callerRva, DWORD callerInstrSize
     BYTE  callPatch[5] = { 0xE8 };
     memcpy(callPatch + 1, &rel32, 4);
 
-    // Generate subdirectory name: HHmmss_XXXXXXXX
+    // 1. Generate subdirectory name: HHmmss_XXXXXXXX
     SYSTEMTIME st = {};
     GetLocalTime(&st);
     wchar_t subDirName[64];
@@ -254,7 +258,7 @@ ValidationResult PointValidator::Validate(DWORD callerRva, DWORD callerInstrSize
     std::wstring subDir = tmpRoot_ + L"\\" + subDirName;
     CreateDirectoryW(subDir.c_str(), nullptr);
 
-    // Copy EXE and DLL into the subdirectory.
+    // 2. Copy EXE and DLL into the subdirectory.
     std::wstring exeFile = fs::path(exePath_).filename().wstring();
     std::wstring dllFile = fs::path(dllPath_).filename().wstring();
     std::wstring subExe  = subDir + L"\\" + exeFile;
@@ -270,7 +274,7 @@ ValidationResult PointValidator::Validate(DWORD callerRva, DWORD callerInstrSize
         return result;
     }
 
-    // Patch the DLL copy: redirect CALL + zero-fill blank region (strict test).
+    // 3. Patch the DLL copy: redirect CALL + zero-fill blank region (strict test).
     HANDLE hFile = CreateFileW(subDll.c_str(), GENERIC_WRITE, 0, nullptr,
                                OPEN_EXISTING, 0, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
@@ -290,7 +294,15 @@ ValidationResult PointValidator::Validate(DWORD callerRva, DWORD callerInstrSize
     WriteFile(hFile, zeros.data(), blank.size, &written, nullptr);
     CloseHandle(hFile);
 
-    // Set up globals for callbacks.
+    // Neutralise any base-relocation entries that target bytes inside the blank
+    // region, so the loader does not overwrite the zero-filled test bytes.
+    {
+        int nReloc = PatchOutRelocEntries(subDll, blank.rva, blank.rva + blank.size);
+        if (nReloc > 0)
+            printf("[validate] neutralised %d reloc entries in blank region\n", nReloc);
+    }
+
+    // 4. Set up globals for callbacks.
     g_val_       = this;
     g_callerHit_ = false;
     g_blankHit_  = false;
@@ -299,7 +311,7 @@ ValidationResult PointValidator::Validate(DWORD callerRva, DWORD callerInstrSize
     g_blankRva_  = blank.rva;
     g_dllBaseV_  = 0;
 
-    // Launch the debug session.
+    // 5. Launch the debug session.
     InitDebugW(const_cast<wchar_t*>(subExe.c_str()),
                nullptr,
                const_cast<wchar_t*>(subDir.c_str()));
@@ -307,15 +319,15 @@ ValidationResult PointValidator::Validate(DWORD callerRva, DWORD callerInstrSize
     SetCustomHandler(UE_CH_LOADDLL,     reinterpret_cast<LPVOID>(OnLoadDll));
     SetCustomHandler(UE_CH_EXITPROCESS, reinterpret_cast<LPVOID>(OnExitProcess));
 
-    // Start watchdog thread.
+    // 6. Start watchdog thread.
     DWORD timeoutMs = static_cast<DWORD>(timeoutSec) * 1000u;
     HANDLE hWatchdog = CreateThread(nullptr, 0, WatchdogThread,
         reinterpret_cast<LPVOID>(static_cast<ULONG_PTR>(timeoutMs)), 0, nullptr);
 
-    // Block until both BPs fire, process exits, or watchdog kicks in.
+    // 7. Block until both BPs fire, process exits, or watchdog kicks in.
     DebugLoop();
 
-    // Reap the watchdog.
+    // 8. Reap the watchdog.
     if (hWatchdog) {
         WaitForSingleObject(hWatchdog, 2000);
         CloseHandle(hWatchdog);
@@ -331,7 +343,7 @@ ValidationResult PointValidator::Validate(DWORD callerRva, DWORD callerInstrSize
            (result.validated == 1) ? "" :
            (g_callerHit_ ? "  (caller BP hit, redirect missed)" : ""));
 
-    // Clean up tmp subdir or retain for inspection.
+    // 9. Clean up tmp subdir or retain for inspection.
     if (result.validated == 1) {
         RemoveDirectoryContents(subDir);
         for (int i = 0; i < 5; ++i) {
