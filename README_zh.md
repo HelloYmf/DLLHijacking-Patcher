@@ -29,24 +29,25 @@
 
 ### 核心算法
 
-| 阶段 | 描述 |
-| --- | --- |
-| **初始化检测** | 从 DLL 加载开始追踪，直到第一个导出函数被调用。此前执行的所有指令属于"初始化区域"，标记为不可覆写。 |
-| **调用点发现** | 在 POST_INIT 阶段，记录每个目标地址落在初始化区域外的 `CALL` 指令作为调用点（`caller_rva` → `rva`）。 |
-| **空间计算** | 合并整个追踪过程中所有已执行的 RVA 区间，找出 `.text` 段中最大的连续未执行区域。起始地址 **16 字节对齐**（满足 x64 ABI 及 SSE/AVX 要求）。 |
-| **验证** | 对于每个 `E8 rel32` 形式的 CALL 调用点：将 CALL 目标重定向到空白区域，将空白区域清零，启动补丁后的调试会话，在 `caller_rva` 和空白区域起始处各设置一个断点。两个断点必须按顺序触发才判定为 `YES`。 |
-| **输出保存** | 判定为 `YES` 时：将 EXE 和补丁后的 DLL（CALL 已重定向，空白区域保留**原始字节**）保存到 `outputs/<callerRva>_<foa>_<size>/`。可选择通过 `--shellcode` 参数将 shellcode 写入空白区域。 |
+| 阶段                 | 描述                                                                                                                                                                                                     |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **初始化检测** | 从 DLL 加载开始追踪，直到第一个导出函数被调用。此前执行的所有指令属于"初始化区域"，标记为不可覆写。                                                                                                      |
+| **调用点发现** | 在 POST_INIT 阶段，记录每个目标地址落在初始化区域外的 `CALL` 指令作为调用点（`caller_rva` → `rva`）。                                                                                             |
+| **空间计算**   | 合并整个追踪过程中所有已执行的 RVA 区间，找出 `.text` 段中最大的连续未执行区域。起始地址 **16 字节对齐**（满足 x64 ABI 及 SSE/AVX 要求）。                                                       |
+| **验证**       | 对于每个 `E8 rel32` 形式的 CALL 调用点：将 CALL 目标重定向到空白区域，将空白区域清零，启动补丁后的调试会话，在 `caller_rva` 和空白区域起始处各设置一个断点。两个断点必须按顺序触发才判定为 `YES`。 |
+| **输出保存**   | 判定为 `YES` 时：将 EXE 和补丁后的 DLL（CALL 已重定向，空白区域保留**原始字节**）保存到 `outputs/<callerRva>_<foa>_<size>/`。可选择通过 `--shellcode` 参数将 shellcode 写入空白区域。        |
+| **重定位中和** | 修补 DLL 的基址重定位表：将所有指向空白区域的条目设置为 `IMAGE_REL_BASED_ABSOLUTE`（类型 0），使加载器跳过这些条目，避免在加载时覆盖注入的 shellcode。                                      |
 
 ---
 
 ## 环境要求
 
-| 依赖项 | 版本 | 说明 |
-| --- | --- | --- |
-| Windows | 10 / 11 (x64 主机) | Win32 调试 API 需要 |
-| Visual Studio | 2019+ (MSVC) | 需安装"使用 C++ 的桌面开发"工作负载 |
-| CMake | ≥ 3.15 | VS 自带或从 cmake.org 下载 |
-| 网络连接 | 仅首次配置时需要 | FetchContent 下载 SQLite 3.45.3 合并版 |
+| 依赖项        | 版本               | 说明                                   |
+| ------------- | ------------------ | -------------------------------------- |
+| Windows       | 10 / 11 (x64 主机) | Win32 调试 API 需要                    |
+| Visual Studio | 2019+ (MSVC)       | 需安装"使用 C++ 的桌面开发"工作负载    |
+| CMake         | ≥ 3.15            | VS 自带或从 cmake.org 下载             |
+| 网络连接      | 仅首次配置时需要   | FetchContent 下载 SQLite 3.45.3 合并版 |
 
 > **TitanEngine** 的 x86 和 x64 预编译二进制文件已包含在 `deps/` 目录中，无需额外构建。
 
@@ -88,28 +89,22 @@ cmake --build build_x86 --config Debug
 dll_tracer.exe --sam <sample_dir> [options]
 ```
 
-| 选项 | 必需 | 描述 |
-| --- | --- | --- |
-| `--sam <dir>` | 是 | 样本目录——必须包含 1 个 `.exe` 和目标 `.dll` |
-| `--dll <name>` | 否 | 当目录包含多个 DLL 时指定目标 DLL 文件名 |
-| `--max-points <N>` | 否 | 记录 N 个调用点后停止（0 = 无限制，默认） |
-| `--validate-timeout <sec>` | 否 | 每个调用点的验证超时时间，单位秒（默认：5） |
-| `--shellcode <hex\|file>` | 否 | shellcode，可以是十六进制字符串（`9090CC`）或二进制文件路径。当 `size ≤ blank_size` 时写入输出 DLL 的空白区域。 |
+| 选项                         | 必需 | 描述                                                                                                                 |
+| ---------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------- |
+| `--sam <dir>`              | 是   | 样本目录——必须包含 1 个 `.exe` 和目标 `.dll`                                                                   |
+| `--dll <name>`             | 否   | 当目录包含多个 DLL 时指定目标 DLL 文件名                                                                             |
+| `--max-points <N>`         | 否   | 记录 N 个调用点后停止（0 = 无限制，默认）                                                                            |
+| `--validate-timeout <sec>` | 否   | 每个调用点的验证超时时间，单位秒（默认：5）                                                                          |
+| `--shellcode <hex\|file>`   | 否   | shellcode，可以是十六进制字符串（`9090CC`）或二进制文件路径。当 `size ≤ blank_size` 时写入输出 DLL 的空白区域。 |
 
 ### 示例
 
 ```bat
-:: 追踪所有调用点，x64 目标
-dll_tracer.exe --sam D:\samples\defender --dll MpClient.dll
-
-:: 快速测试：仅第一个调用点，x86 目标
-dll_tracer.exe --sam D:\samples\edge --dll msedgeupdate.dll --max-points 1
-
-:: 带 shellcode 注入的验证
-dll_tracer.exe --sam D:\samples\edge --max-points 1 --shellcode 909090C3
+:: 快速测试
+dll_tracer.exe --sam D:\samples\test --dll test.dll --max-points 1
 
 :: 从二进制文件加载 shellcode
-dll_tracer.exe --sam D:\samples\target --shellcode D:\payloads\calc.bin
+dll_tracer.exe --sam D:\samples\test --shellcode D:\payloads\calc.bin
 ```
 
 ---
@@ -119,12 +114,12 @@ dll_tracer.exe --sam D:\samples\target --shellcode D:\payloads\calc.bin
 文件名：`{exe_stem}_{dll_stem}_{YYYYMMDD_HHMMSS}.db`
 格式：SQLite 3
 
-| 表名 | 描述 |
-| --- | --- |
-| `dll_instructions` | DLL 内执行的每条指令：`rva`、`execution_order`、`instr_size`、`is_init_end`、`in_init_region` |
-| `points` | 发现的调用点：`rva`、`caller_rva`、`execution_order`、`blank_foa`、`blank_rva`、`blank_size`、`validated`（1=YES，0=TIMEOUT，-1=NO） |
-| `exports` | 追踪时的 DLL 导出表快照 |
-| `analysis_meta` | 键值对元数据：exe/dll 名称、时间戳、操作系统信息、指令计数 |
+| 表名                 | 描述                                                                                                                                               |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dll_instructions` | DLL 内执行的每条指令：`rva`、`execution_order`、`instr_size`、`is_init_end`、`in_init_region`                                            |
+| `points`           | 发现的调用点：`rva`、`caller_rva`、`execution_order`、`blank_foa`、`blank_rva`、`blank_size`、`validated`（1=YES，0=TIMEOUT，-1=NO） |
+| `exports`          | 追踪时的 DLL 导出表快照                                                                                                                            |
+| `analysis_meta`    | 键值对元数据：exe/dll 名称、时间戳、操作系统信息、指令计数                                                                                         |
 
 ---
 
@@ -146,24 +141,35 @@ dll_tracer.exe --sam D:\samples\target --shellcode D:\payloads\calc.bin
 5. 设置 **两个一次性断点**：一个在 `caller_rva`，一个在 `blank_rva`
 6. 启动看门狗线程，按配置的超时时间监控
 
-| 结果 | 含义 | `validated` 值 |
-| --- | --- | --- |
-| `YES` | **两个**断点按顺序触发——调用点到达且重定向成功 | `1` |
-| `TIMEOUT` | 进程运行超时，两个断点未全部触发 | `0` |
-| `NO` | 进程在到达调用点前崩溃（或非 E8 CALL 被跳过） | `-1` |
+| 结果        | 含义                                                   | `validated` 值 |
+| ----------- | ------------------------------------------------------ | ---------------- |
+| `YES`     | **两个**断点按顺序触发——调用点到达且重定向成功 | `1`            |
+| `TIMEOUT` | 进程运行超时，两个断点未全部触发                       | `0`            |
+| `NO`      | 进程在到达调用点前崩溃（或非 E8 CALL 被跳过）          | `-1`           |
 
 ### `YES` 时的输出
 
 保存到 `<sam_dir>/outputs/<callerRva8>_<blankFoa8>_<blankSize8>/`：
 
-| 文件 | 内容 |
-| --- | --- |
+| 文件      | 内容                                                             |
+| --------- | ---------------------------------------------------------------- |
 | `*.dll` | 原始 DLL，仅 CALL 重定向被修补——**空白区域保留原始字节** |
-| `*.exe` | 宿主 EXE 的未修改副本（便于重新测试） |
+| `*.exe` | 宿主 EXE 的未修改副本（便于重新测试）                            |
 
 如果提供了 `--shellcode` 且其大小不超过 `blank_size`，shellcode 也会被写入输出 DLL 的空白区域。
 
 > shellcode 以普通函数调用方式执行（`E8 CALL`），因此栈处于标准函数入口状态。在 shellcode 末尾使用简单的 `RET` 即可返回原始调用流程。
+
+### 基址重定位中和
+
+当 PE 加载器应用 ASLR 时，它会遍历 `.reloc` 节并修补其中列出的每个地址。如果任何重定位条目指向空白区域内的字节，加载器将覆盖注入的 shellcode——导致崩溃或意外行为。
+
+为防止这种情况，本工具通过将这些条目的类型半字节设置为 `0`（`IMAGE_REL_BASED_ABSOLUTE`）来**中和**它们。加载器将类型 0 的条目视为空操作，从而保持 shellcode 完整。
+
+此中和操作在两个地方应用：
+
+1. **验证期间** — 清零的空白区域必须保持不变，以进行严格测试。
+2. **保存输出时** — 确保最终补丁后的 DLL 在 ASLR 下正常工作。
 
 ### 地址对齐
 

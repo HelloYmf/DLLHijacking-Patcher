@@ -1,5 +1,7 @@
 # DLLHijacking-Patcher
 
+[中文文档](README_zh.md)
+
 A Windows DLL dynamic tracer and patching tool built on [TitanEngine](https://github.com/HelloYmf/TitanEngine).
 It traces every instruction executed inside a target DLL, identifies the initialization phase, discovers post-init call-site **points**, calculates the largest free blank region in `.text`, and validates each point by redirecting its `CALL` into that region — confirming the region is safely reachable and writable with shellcode.
 
@@ -35,6 +37,7 @@ Supports both **x86** and **x64** targets.
 | **Space calculation** | Merges all executed RVA intervals across the full trace to find the largest contiguous unexecuted range in `.text`. The start address is **16-byte aligned** (satisfies x64 ABI + SSE/AVX requirements).                                             |
 | **Validation**        | For each point with an `E8 rel32` CALL: redirects the CALL target to the blank region, zero-fills the blank, launches a patched debug session, and places two BPs — at `caller_rva` and at the blank region start. Both must fire in order for `YES`. |
 | **Output saving**     | On `YES`: saves EXE + patched DLL (CALL redirected, blank region with **original bytes**) to `outputs/<callerRva>_<foa>_<size>/`. Optionally writes `--shellcode` into the blank region.                                                         |
+| **Reloc neutralization** | Patches the DLL's base-relocation table: any entry targeting the blank region is set to `IMAGE_REL_BASED_ABSOLUTE` (type 0), so the loader skips it and won't overwrite the injected shellcode at load time.                                   |
 
 ---
 
@@ -98,17 +101,11 @@ dll_tracer.exe --sam <sample_dir> [options]
 ### Examples
 
 ```bat
-:: Trace all points, x64 target
-dll_tracer.exe --sam D:\samples\defender --dll MpClient.dll
-
-:: Quick test: first point only, x86 target
-dll_tracer.exe --sam D:\samples\edge --dll msedgeupdate.dll --max-points 1
-
-:: Validate with shellcode injection
-dll_tracer.exe --sam D:\samples\edge --max-points 1 --shellcode 909090C3
+:: Quick test
+dll_tracer.exe --sam D:\samples\test --dll test.dll --max-points 1
 
 :: Shellcode from a binary file
-dll_tracer.exe --sam D:\samples\target --shellcode D:\payloads\calc.bin
+dll_tracer.exe --sam D:\samples\test --shellcode D:\payloads\calc.bin
 ```
 
 ---
@@ -163,6 +160,17 @@ Saves to `<sam_dir>/outputs/<callerRva8>_<blankFoa8>_<blankSize8>/`:
 If `--shellcode` was provided and its size fits within `blank_size`, the shellcode is also written into the blank region of the output DLL.
 
 > The shellcode is called as a normal function (`E8 CALL`), so the stack is in standard function-entry state. A simple `RET` at the end of the shellcode returns control to the original call flow.
+
+### Base-Relocation Neutralization
+
+When the PE loader applies ASLR, it walks the `.reloc` section and patches every address listed there. If any relocation entry targets bytes inside the blank region, the loader would overwrite the injected shellcode — causing crashes or unexpected behavior.
+
+To prevent this, the tool **neutralizes** such entries by setting their type nibble to `0` (`IMAGE_REL_BASED_ABSOLUTE`). The loader treats type-0 entries as no-ops, leaving the shellcode intact.
+
+This neutralization is applied in two places:
+
+1. **During validation** — the zero-filled blank region must remain untouched for the strict test.
+2. **When saving output** — ensures the final patched DLL works correctly under ASLR.
 
 ### Address Alignment
 
